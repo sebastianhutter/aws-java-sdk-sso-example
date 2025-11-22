@@ -33,9 +33,9 @@ import java.util.concurrent.TimeUnit;
 /**
  * AWS SSO authentication using Google OAuth HTTP client library.
  *
- * This example demonstrates how to authenticate with AWS IAM Identity Center
- * using the OAuth 2.0 Authorization Code Grant flow with PKCE (RFC 7636)
- * implemented with Google's HTTP client library instead of the AWS SDK.
+ * This example demonstrates the OAuth 2.0 Refresh Token Grant flow.
+ * It first authenticates using Authorization Code flow to obtain tokens,
+ * then demonstrates refreshing the access token using the refresh token.
  */
 public class App {
 
@@ -44,6 +44,19 @@ public class App {
     private static final int CALLBACK_PORT = 65500;
     // callback url needs to use /oauth/callback!
     private static final String REDIRECT_URI = "http://127.0.0.1:" + CALLBACK_PORT + "/oauth/callback";
+
+    /**
+     * Holds the client registration info needed for token operations.
+     */
+    public static class ClientInfo {
+        public final String clientId;
+        public final String clientSecret;
+
+        public ClientInfo(String clientId, String clientSecret) {
+            this.clientId = clientId;
+            this.clientSecret = clientSecret;
+        }
+    }
 
     public static void main(String[] args) {
         if (args.length != 5) {
@@ -60,88 +73,76 @@ public class App {
         String roleName = args[4];
 
         try {
-            // Step 1-4: Authenticate and get access token
-            String accessToken = authenticate(startUrl, issuerUrl, region);
+            String oidcEndpoint = String.format("https://oidc.%s.amazonaws.com", region);
 
-            // Step 5: Get role credentials using the access token
-            RoleCredentials credentials = getRoleCredentials(accessToken, region, accountId, roleName);
+            // ============================================================
+            // STEP 1: Initial authentication using Authorization Code flow
+            // ============================================================
+            System.out.println("=== STEP 1: Initial Authentication ===\n");
 
-            // Step 6: Verify credentials by listing S3 buckets
-            listS3Buckets(region, credentials);
+            // Register client (needed for both initial auth and refresh)
+            System.out.println("Registering client...");
+            System.out.println("Issuer URL: " + issuerUrl);
+            RegisterClientResponse registerResponse = registerClient(oidcEndpoint, issuerUrl);
+            System.out.println("Client registered successfully");
+            System.out.println("Client ID: " + registerResponse.clientId + "\n");
+
+            ClientInfo clientInfo = new ClientInfo(registerResponse.clientId, registerResponse.clientSecret);
+
+            // Authenticate and get initial tokens
+            TokenResponse initialTokens = authenticateWithAuthorizationCode(
+                    oidcEndpoint, clientInfo, startUrl);
+
+            System.out.println("Initial Access Token: " + initialTokens.accessToken.substring(0, 50) + "...");
+            System.out.println("Refresh Token: " + initialTokens.refreshToken.substring(0, 50) + "...");
+            System.out.println("Token expires in: " + initialTokens.expiresIn + " seconds\n");
+
+            // ============================================================
+            // STEP 2: Use initial access token to list S3 buckets
+            // ============================================================
+            System.out.println("=== STEP 2: Using Initial Access Token ===\n");
+
+            RoleCredentials initialCredentials = getRoleCredentials(
+                    initialTokens.accessToken, region, accountId, roleName);
+            listS3Buckets(region, initialCredentials);
+
+            // ============================================================
+            // STEP 3: Wait a few seconds to simulate time passing
+            // ============================================================
+            System.out.println("\n=== STEP 3: Waiting 5 seconds before refreshing token ===\n");
+            Thread.sleep(5000);
+
+            // ============================================================
+            // STEP 4: Refresh the access token using refresh token
+            // ============================================================
+            System.out.println("=== STEP 4: Refreshing Access Token ===\n");
+
+            TokenResponse refreshedTokens = refreshAccessToken(
+                    oidcEndpoint, clientInfo, initialTokens.refreshToken);
+
+            System.out.println("Refreshed Access Token: " + refreshedTokens.accessToken.substring(0, 50) + "...");
+            if (refreshedTokens.refreshToken != null) {
+                System.out.println("New Refresh Token: " + refreshedTokens.refreshToken.substring(0, 50) + "...");
+            } else {
+                System.out.println("Refresh Token: (unchanged - reuse previous)");
+            }
+            System.out.println("Token expires in: " + refreshedTokens.expiresIn + " seconds\n");
+
+            // ============================================================
+            // STEP 5: Use refreshed access token to list S3 buckets again
+            // ============================================================
+            System.out.println("=== STEP 5: Using Refreshed Access Token ===\n");
+
+            RoleCredentials refreshedCredentials = getRoleCredentials(
+                    refreshedTokens.accessToken, region, accountId, roleName);
+            listS3Buckets(region, refreshedCredentials);
+
+            System.out.println("\n=== Refresh Token Flow Complete! ===");
 
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
-        }
-    }
-
-    /**
-     * Authenticates with AWS SSO using the Authorization Code Grant flow with PKCE.
-     */
-    public static String authenticate(String startUrl, String issuerUrl, String region) throws Exception {
-        String oidcEndpoint = String.format("https://oidc.%s.amazonaws.com", region);
-
-        // Step 1: Register the client with redirect URI for Authorization Code flow
-        System.out.println("Registering client...");
-        System.out.println("Issuer URL: " + issuerUrl);
-        RegisterClientResponse registerResponse = registerClient(oidcEndpoint, issuerUrl);
-        System.out.println("Client registered successfully");
-        System.out.println("Client ID: " + registerResponse.clientId);
-
-        // Step 2: Generate PKCE code verifier and challenge
-        String codeVerifier = generateCodeVerifier();
-        String codeChallenge = generateCodeChallenge(codeVerifier);
-        String state = generateState();
-
-        // Step 3: Start local HTTP server to receive the callback
-        CompletableFuture<String> authCodeFuture = new CompletableFuture<>();
-        HttpServer server = startCallbackServer(authCodeFuture, state);
-
-        try {
-            // Step 4: Build authorization URL and open browser
-            String authorizationUrl = buildAuthorizationUrl(
-                    oidcEndpoint,
-                    registerResponse.clientId,
-                    REDIRECT_URI,
-                    codeChallenge,
-                    state,
-                    startUrl);
-
-            System.out.println("\n===========================================");
-            System.out.println("Opening browser for authentication...");
-            System.out.println("Authorization URL: " + authorizationUrl);
-            System.out.println("===========================================\n");
-
-            // Open browser
-            if (java.awt.Desktop.isDesktopSupported()) {
-                try {
-                    java.awt.Desktop.getDesktop().browse(java.net.URI.create(authorizationUrl));
-                } catch (Exception e) {
-                    System.out.println("Could not open browser automatically. Please visit the URL above.");
-                }
-            }
-
-            // Step 5: Wait for authorization code from callback
-            System.out.println("Waiting for authorization callback...");
-            String authorizationCode = authCodeFuture.get(5, TimeUnit.MINUTES);
-            System.out.println("Authorization code received!");
-
-            // Step 6: Exchange authorization code for tokens
-            String accessToken = exchangeCodeForToken(
-                    oidcEndpoint,
-                    registerResponse.clientId,
-                    registerResponse.clientSecret,
-                    authorizationCode,
-                    REDIRECT_URI,
-                    codeVerifier);
-
-            System.out.println("Authentication successful!\n");
-            return accessToken;
-
-        } finally {
-            // Stop the callback server
-            server.stop(0);
         }
     }
 
@@ -153,7 +154,7 @@ public class App {
                 request -> request.setParser(new JsonObjectParser(JSON_FACTORY)));
 
         Map<String, Object> data = new HashMap<>();
-        data.put("clientName", "my-java-app-auth-code");
+        data.put("clientName", "my-java-app-refresh-token");
         data.put("clientType", "public");
         data.put("issuerUrl", issuerUrl);
         data.put("grantTypes", new String[] { "authorization_code", "refresh_token" });
@@ -168,6 +169,130 @@ public class App {
 
         HttpResponse response = request.execute();
         return response.parseAs(RegisterClientResponse.class);
+    }
+
+    /**
+     * Authenticates using Authorization Code flow and returns the full token response.
+     */
+    private static TokenResponse authenticateWithAuthorizationCode(
+            String oidcEndpoint,
+            ClientInfo clientInfo,
+            String startUrl) throws Exception {
+
+        // Generate PKCE code verifier and challenge
+        String codeVerifier = generateCodeVerifier();
+        String codeChallenge = generateCodeChallenge(codeVerifier);
+        String state = generateState();
+
+        // Start local HTTP server to receive the callback
+        CompletableFuture<String> authCodeFuture = new CompletableFuture<>();
+        HttpServer server = startCallbackServer(authCodeFuture, state);
+
+        try {
+            // Build authorization URL and open browser
+            String authorizationUrl = buildAuthorizationUrl(
+                    oidcEndpoint,
+                    clientInfo.clientId,
+                    REDIRECT_URI,
+                    codeChallenge,
+                    state,
+                    startUrl);
+
+            System.out.println("===========================================");
+            System.out.println("Opening browser for authentication...");
+            System.out.println("Authorization URL: " + authorizationUrl);
+            System.out.println("===========================================\n");
+
+            // Open browser
+            if (java.awt.Desktop.isDesktopSupported()) {
+                try {
+                    java.awt.Desktop.getDesktop().browse(java.net.URI.create(authorizationUrl));
+                } catch (Exception e) {
+                    System.out.println("Could not open browser automatically. Please visit the URL above.");
+                }
+            }
+
+            // Wait for authorization code from callback
+            System.out.println("Waiting for authorization callback...");
+            String authorizationCode = authCodeFuture.get(5, TimeUnit.MINUTES);
+            System.out.println("Authorization code received!\n");
+
+            // Exchange authorization code for tokens
+            TokenResponse tokenResponse = exchangeCodeForTokens(
+                    oidcEndpoint,
+                    clientInfo,
+                    authorizationCode,
+                    codeVerifier);
+
+            System.out.println("Initial authentication successful!\n");
+            return tokenResponse;
+
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * Exchanges the authorization code for tokens (returns full response with refresh token).
+     */
+    private static TokenResponse exchangeCodeForTokens(
+            String oidcEndpoint,
+            ClientInfo clientInfo,
+            String authorizationCode,
+            String codeVerifier) throws IOException {
+
+        HttpRequestFactory requestFactory = HTTP_TRANSPORT.createRequestFactory(
+                request -> request.setParser(new JsonObjectParser(JSON_FACTORY)));
+
+        Map<String, String> data = new HashMap<>();
+        data.put("clientId", clientInfo.clientId);
+        data.put("clientSecret", clientInfo.clientSecret);
+        data.put("grantType", "authorization_code");
+        data.put("code", authorizationCode);
+        data.put("redirectUri", REDIRECT_URI);
+        data.put("codeVerifier", codeVerifier);
+
+        HttpRequest request = requestFactory.buildPostRequest(
+                new GenericUrl(oidcEndpoint + "/token"),
+                new JsonHttpContent(JSON_FACTORY, data));
+
+        request.getHeaders().setContentType("application/json");
+
+        HttpResponse response = request.execute();
+        return response.parseAs(TokenResponse.class);
+    }
+
+    /**
+     * Refreshes the access token using a refresh token.
+     * This is the key method demonstrating the Refresh Token Grant flow.
+     */
+    private static TokenResponse refreshAccessToken(
+            String oidcEndpoint,
+            ClientInfo clientInfo,
+            String refreshToken) throws IOException {
+
+        System.out.println("Requesting new access token using refresh token...");
+
+        HttpRequestFactory requestFactory = HTTP_TRANSPORT.createRequestFactory(
+                request -> request.setParser(new JsonObjectParser(JSON_FACTORY)));
+
+        Map<String, String> data = new HashMap<>();
+        data.put("clientId", clientInfo.clientId);
+        data.put("clientSecret", clientInfo.clientSecret);
+        data.put("grantType", "refresh_token");
+        data.put("refreshToken", refreshToken);
+
+        HttpRequest request = requestFactory.buildPostRequest(
+                new GenericUrl(oidcEndpoint + "/token"),
+                new JsonHttpContent(JSON_FACTORY, data));
+
+        request.getHeaders().setContentType("application/json");
+
+        HttpResponse response = request.execute();
+        TokenResponse tokenResponse = response.parseAs(TokenResponse.class);
+
+        System.out.println("Token refresh successful!\n");
+        return tokenResponse;
     }
 
     /**
@@ -303,39 +428,6 @@ public class App {
     }
 
     /**
-     * Exchanges the authorization code for an access token.
-     */
-    private static String exchangeCodeForToken(
-            String oidcEndpoint,
-            String clientId,
-            String clientSecret,
-            String authorizationCode,
-            String redirectUri,
-            String codeVerifier) throws IOException {
-
-        HttpRequestFactory requestFactory = HTTP_TRANSPORT.createRequestFactory(
-                request -> request.setParser(new JsonObjectParser(JSON_FACTORY)));
-
-        Map<String, String> data = new HashMap<>();
-        data.put("clientId", clientId);
-        data.put("clientSecret", clientSecret);
-        data.put("grantType", "authorization_code");
-        data.put("code", authorizationCode);
-        data.put("redirectUri", redirectUri);
-        data.put("codeVerifier", codeVerifier);
-
-        HttpRequest request = requestFactory.buildPostRequest(
-                new GenericUrl(oidcEndpoint + "/token"),
-                new JsonHttpContent(JSON_FACTORY, data));
-
-        request.getHeaders().setContentType("application/json");
-
-        HttpResponse response = request.execute();
-        TokenResponse tokenResponse = response.parseAs(TokenResponse.class);
-        return tokenResponse.accessToken;
-    }
-
-    /**
      * Gets role credentials using the SSO access token.
      */
     public static RoleCredentials getRoleCredentials(
@@ -361,11 +453,9 @@ public class App {
 
         RoleCredentials credentials = credentialsResponse.roleCredentials;
 
-        System.out.println("AWS Credentials:");
-        System.out.println("Access Key: " + credentials.accessKeyId);
-        System.out.println("Secret Key: " + credentials.secretAccessKey);
-        System.out.println("Session Token: " + credentials.sessionToken);
-        System.out.println("Expiration: " + credentials.expiration);
+        System.out.println("AWS Credentials obtained:");
+        System.out.println("  Access Key: " + credentials.accessKeyId);
+        System.out.println("  Expiration: " + credentials.expiration);
 
         return credentials;
     }
@@ -386,8 +476,12 @@ public class App {
 
         try {
             ListBucketsResponse listBucketsResponse = s3Client.listBuckets();
-            System.out.println("\nS3 Buckets:");
-            listBucketsResponse.buckets().forEach(bucket -> System.out.println("- " + bucket.name()));
+            System.out.println("S3 Buckets (count: " + listBucketsResponse.buckets().size() + "):");
+            listBucketsResponse.buckets().stream().limit(5).forEach(bucket ->
+                System.out.println("  - " + bucket.name()));
+            if (listBucketsResponse.buckets().size() > 5) {
+                System.out.println("  ... and " + (listBucketsResponse.buckets().size() - 5) + " more");
+            }
         } catch (Exception e) {
             System.err.println("Failed to list S3 buckets: " + e.getMessage());
         } finally {
