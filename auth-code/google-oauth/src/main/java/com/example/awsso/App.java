@@ -41,25 +41,27 @@ public class App {
 
     private static final HttpTransport HTTP_TRANSPORT = new NetHttpTransport();
     private static final JsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
-    private static final int CALLBACK_PORT = 8080;
-    private static final String REDIRECT_URI = "http://localhost:" + CALLBACK_PORT + "/callback";
+    private static final int CALLBACK_PORT = 65500;
+    // callback url needs to use /oauth/callback!
+    private static final String REDIRECT_URI = "http://127.0.0.1:" + CALLBACK_PORT + "/oauth/callback";
 
     public static void main(String[] args) {
-        if (args.length != 4) {
-            System.err.println("Usage: App <startUrl> <region> <accountId> <roleName>");
+        if (args.length != 5) {
+            System.err.println("Usage: App <startUrl> <issuerUrl> <region> <accountId> <roleName>");
             System.err.println(
-                    "Example: App https://d-1234567890.awsapps.com/start eu-central-1 123456789012 AdministratorAccess");
+                    "Example: App https://d-1234567890.awsapps.com/start https://identitycenter.amazonaws.com/ssoins-1234567890123456 eu-central-1 123456789012 AdministratorAccess");
             System.exit(1);
         }
 
         String startUrl = args[0];
-        String region = args[1];
-        String accountId = args[2];
-        String roleName = args[3];
+        String issuerUrl = args[1];
+        String region = args[2];
+        String accountId = args[3];
+        String roleName = args[4];
 
         try {
             // Step 1-4: Authenticate and get access token
-            String accessToken = authenticate(startUrl, region);
+            String accessToken = authenticate(startUrl, issuerUrl, region);
 
             // Step 5: Get role credentials using the access token
             RoleCredentials credentials = getRoleCredentials(accessToken, region, accountId, roleName);
@@ -77,12 +79,13 @@ public class App {
     /**
      * Authenticates with AWS SSO using the Authorization Code Grant flow with PKCE.
      */
-    public static String authenticate(String startUrl, String region) throws Exception {
+    public static String authenticate(String startUrl, String issuerUrl, String region) throws Exception {
         String oidcEndpoint = String.format("https://oidc.%s.amazonaws.com", region);
 
         // Step 1: Register the client with redirect URI for Authorization Code flow
         System.out.println("Registering client...");
-        RegisterClientResponse registerResponse = registerClient(oidcEndpoint);
+        System.out.println("Issuer URL: " + issuerUrl);
+        RegisterClientResponse registerResponse = registerClient(oidcEndpoint, issuerUrl);
         System.out.println("Client registered successfully");
         System.out.println("Client ID: " + registerResponse.clientId);
 
@@ -145,14 +148,16 @@ public class App {
     /**
      * Registers a client with AWS SSO OIDC for Authorization Code flow.
      */
-    private static RegisterClientResponse registerClient(String oidcEndpoint) throws IOException {
+    private static RegisterClientResponse registerClient(String oidcEndpoint, String issuerUrl) throws IOException {
         HttpRequestFactory requestFactory = HTTP_TRANSPORT.createRequestFactory(
                 request -> request.setParser(new JsonObjectParser(JSON_FACTORY)));
 
         Map<String, Object> data = new HashMap<>();
         data.put("clientName", "my-java-app-auth-code");
         data.put("clientType", "public");
+        data.put("issuerUrl", issuerUrl);
         data.put("grantTypes", new String[] { "authorization_code", "refresh_token" });
+        data.put("scopes", new String[] { "sso:account:access" });
         data.put("redirectUris", new String[] { REDIRECT_URI });
 
         HttpRequest request = requestFactory.buildPostRequest(
@@ -223,7 +228,7 @@ public class App {
             throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(CALLBACK_PORT), 0);
 
-        server.createContext("/callback", exchange -> {
+        server.createContext("/oauth/callback", exchange -> {
             try {
                 String query = exchange.getRequestURI().getQuery();
                 Map<String, String> params = parseQueryString(query);
