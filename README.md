@@ -7,4 +7,5 @@ DISCLAIMER: This code was created with assistance from Claude Code and should no
 ## Reference implementations
 
 - [device-auth](./device-auth/): Reference implementation for "Device Authorization Grant (RFC 8628)", suitable for devices without interactive sessions (CLIs, etc.)
-- [auth-code](./auth-code/): Reference implementation for "Authorization Code Grant with PKCE (RFC 7636)", suitable for interactive applications 
+- [auth-code](./auth-code/): Reference implementation for "Authorization Code Grant with PKCE (RFC 7636)", suitable for interactive applications
+- [refresh-code](./refresh-code/): Reference implementation for "Refresh Token Grant", demonstrating how to use refresh tokens for applications with long-running sessions
