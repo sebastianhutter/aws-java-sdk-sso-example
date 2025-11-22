@@ -6,7 +6,7 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.Bucket;
 import com.amazonaws.services.sso.AWSSSO;
-import com.amazonaws.services.sso.AWSSOClientBuilder;
+import com.amazonaws.services.sso.AWSSSOClient;
 import com.amazonaws.services.sso.model.GetRoleCredentialsRequest;
 import com.amazonaws.services.sso.model.GetRoleCredentialsResult;
 import com.amazonaws.services.sso.model.RoleCredentials;
@@ -100,7 +100,7 @@ public class App {
             String roleName) {
 
         // Step 5: Get role credentials
-        AWSSSO ssoClient = AWSSOClientBuilder.standard()
+        AWSSSO ssoClient = AWSSSOClient.builder()
                 .withRegion(region)
                 .build();
 
